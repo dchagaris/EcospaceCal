@@ -30,15 +30,18 @@ library('R.utils')
 #'
 #' @return A list containing the best parameters and the full result object.
 #' 
-  
-run_calibration <- function(method, predprey_pairs, output_base,calibration = 1,n_cores = max(detectCores()-1,1), config = list()) {
+#allow predprey_pairs to include NA to assume predator column where prey = NA
+fn.calibrate_ecospace <- function(method, do.vuls, do.env, predprey_pairs, env_respfxns, calibration = 1,n_cores = max(detectCores()-1,1), config = list()) {
 # 
-  # calibration = 1
-  # n_cores = max(detectCores()-1,1)
-  # method = "GA"
-  # predprey_pairs = predprey.sens[,1:2]
-  # output_base = dir.out
-  # config <- list(popSize = 200, run = 200, pmutation = 0.2, maxiter = 2000)
+  calibration = 1
+  n_cores = max(detectCores()-1,1)
+  method = "GA"
+  do.vuls = TRUE
+  do.env = FALSE
+  predprey_pairs = data.frame(pred=1:12, prey=NA, baseval=2) #predprey.sens[,c(1:2,5)]
+  env_respfxns = NULL
+  output_base = dir.out
+  config <- list(popSize = 24, run = 10, pmutation = 0.2, maxiter = 50)
   # 
   # === 1. Default Configurations ===
   
@@ -65,8 +68,21 @@ run_calibration <- function(method, predprey_pairs, output_base,calibration = 1,
     stop("Required variables 'cmd_base' and/or 'fn.runEwE' not found. Ensure setup.R is sourced.")
   }
   
-  n_vars <- nrow(predprey_pairs)
-  if (n_vars == 0) stop("No predator-prey pairs found")
+  if(do.vuls){
+    pdcol = unique(predprey_pairs$pred[is.na(predprey_pairs$prey)])
+    pdpy = c(0,unique(predprey_pairs$pred[!is.na(predprey_pairs$prey)]))
+    if(length(which(pdcol %in% pdpy))>0){
+      stop("Trying to estimate ki and kij for at least on predator. Check predprey_pairs input.")
+    }
+  }
+  
+  n_vuls <- n_env <- 0
+  if(do.vuls) n_vuls <- nrow(predprey_pairs)
+  if(do.env) n_env <- nrow(env_respfxn)  #need to melt the env resp fxn dataframe
+  #medations functions
+  
+  n_pars = n_vuls + n_env
+  if (n_pars == 0) stop("n_pars==0: No predator-prey pairs or environmental responses parameters to estimate.  Check inputs.")
   
   # Setup output directory
   timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
@@ -77,20 +93,48 @@ run_calibration <- function(method, predprey_pairs, output_base,calibration = 1,
   # Initialize cache
   cache <- new.env(hash = TRUE, parent = emptyenv())
   
+  log_vuln_vec = log_env_vec = numeric()
+  if(do.vuls) log_vuln_vec = log(predprey_pairs$baseval+1)
+  if(do.env) log_env_vec = log(env_respfxns$baseval+1)
+  log_par_vec = c(log_vuln_vec,log_env_vec)
+  
+  #need to think about how to index the parameter vector as it continues to grow
+  if(do.vuls & !do.env) vul.par.idx = 1:n_vuls
+  if(do.env & !do.vuls) env.par.idx = 1:n_env
+  
+  if(do.vuls & do.env){
+    vul.par.idx = 1:n_vuls
+    env.par.idx = (n_vuls+1):(n_vuls+n_env)
+  }  
+  
   # === 3. Standardized Objective Function (Minimization) ===
   # This function is used by all methods. It returns the raw score (lower is better).
-  objective_function <- function(log_vuln_vec) {
-    #log_vuln_vec = log(predprey.sens$baseval+1)
-    vuln_vec <- exp(log_vuln_vec)
-    config_hash <- digest(vuln_vec, algo = "md5")
+  objective_function <- function(log_par_vec) {
     
+    #log_vuln_vec = log(predprey_pairs$baseval)
+    #vuln_vec <- exp(log_vuln_vec)
+    par_vec <- exp(log_par_vec)-1
+    config_hash <- digest(par_vec, algo = "md5")
     
     if (exists(config_hash, envir = cache)) {
       return(cache[[config_hash]])
     }
     
-    tags <- paste0("<ECOSIM_VULNERABILITIES_INDEXED>(", predprey_pairs$pred, " ", predprey_pairs$prey,
+    tags.vul = tags.env = character()
+    if(do.vuls){
+    vuln_vec = par_vec[vul.par.idx]
+    tags.vul <- paste0("<ECOSIM_VULNERABILITIES_INDEXED>(", predprey_pairs$pred, " ", ifelse(is.na(predprey_pairs$prey),"",predprey_pairs$prey),
                    "), ", sprintf("%.5f", vuln_vec), ", Indexed.Single")
+    }
+    
+    if(do.env){
+      env_vec = par_vec[env.par.idx]
+      tags.env <- paste0("<ECOSIM_ENVIRONMENTAL_RESPONSE_INDEXED>(", predprey_pairs$pred, " ", ifelse(is.na(predprey_pairs$prey),"",predprey_pairs$prey),
+                         "), ", sprintf("%.5f", vuln_vec), ", Indexed.Single")
+    }
+    
+    tags = c(tags.vul,tags.env)
+    
     this_dir <- tempfile(tmpdir = run_dir)
     dir.create(this_dir)
     #out_path <- paste0(this_dir, "-output")
@@ -132,7 +176,7 @@ run_calibration <- function(method, predprey_pairs, output_base,calibration = 1,
   
   # === 4. Method-Specific Execution ===
   result_object <- NULL
-  best_vuln_log <- NULL
+  best_par_log <- NULL
   
 
   # Setup parallel backend for GA and CMAES
@@ -152,21 +196,26 @@ run_calibration <- function(method, predprey_pairs, output_base,calibration = 1,
     
     #initialize with base values
     ga.popfxn = function(object){
-      init.vuln = log(predprey.sens$baseval[1:n_sens_kij])
+      init.pars = log_par_vec #log(predprey_pairs$baseval)
       popSize = run_config$popSize
-      nBits = n_sens_kij
-      matrix(rep(init.vuln,popSize),ncol=nBits, nrow=popSize, byrow = T)
+      nBits = n_pars
+      matrix(rep(init.pars,popSize),ncol=nBits, nrow=popSize, byrow = T)
     }
     
     cat("Starting Genetic Algorithm optimization...\n")
     # GA maximizes, so we need a wrapper for our minimizing function
-    fitness_wrapper <- function(log_vuln_vec) - objective_function(log_vuln_vec)
+    fitness_wrapper <- function(log_par_vec) - objective_function(log_par_vec)
+    lower.vuls <- upper.vuls <- lower.env <- upper.env <- numeric()
+    lower.vuls <- rep(log(VULN_MIN+1),n_vuls)
+    upper.vuls <- rep(log(VULN_MAX+1),n_vuls)
+    lower.env <- rep(0,n_env)
+    upper.env <- rep(1,n_env)
     
     result_object <- ga(
       type = "real-valued",
       fitness = fitness_wrapper,
-      lower = rep(log(VULN_MIN), n_vars),
-      upper = rep(log(VULN_MAX), n_vars),
+      lower = c(lower.vuls, lower.env), #rep(log(VULN_MIN), n_vars),
+      upper = c(upper.vuls, upper.env), #rep(log(VULN_MAX), n_vars),
       popSize = run_config$popSize,
       run = run_config$run,
       maxiter = run_config$maxiter,
@@ -177,7 +226,8 @@ run_calibration <- function(method, predprey_pairs, output_base,calibration = 1,
       parallel = TRUE,
       monitor = function(obj) cat(sprintf("Generation %d: Best fitness = %.4f\n", obj@iter, obj@fitnessValue))
     )
-    best_vuln_log <- result_object@solution[1, ]
+    
+    best_par_log <- result_object@solution[1, ]
     summary(result_object)
     result_object@fitness
     # --- CMA-ES ---
@@ -242,7 +292,7 @@ run_calibration <- function(method, predprey_pairs, output_base,calibration = 1,
   
   # === 5. Save Final Results ===
   cat("\nOptimization complete. Saving results...\n")
-  best_vuln <- exp(best_vuln_log)
+  best_pars <- exp(best_par_log)-1
   final_cmd <- cmd_base
   final_tags <- paste0("<ECOSIM_VULNERABILITIES_INDEXED>(", predprey_pairs$pred, " ", predprey_pairs$prey,
                        "), ", sprintf("%.5f", best_vuln), ", Indexed.Single")
