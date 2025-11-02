@@ -32,20 +32,18 @@ library('R.utils')
 # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 #OBJECTIVE FUNCTION-------------------------------------------------------------
 objective_function <- function(log_par_vec, run_path) {
+  
   par_vec <- exp(log_par_vec)-1
+  this_dir <- run_path
+  
+  #cache----
   config_hash <- digest(par_vec, algo = "md5")
   
   if (exists(config_hash, envir = cache)) {
     return(cache[[config_hash]])
   }
-  
-  # this_dir <- tempfile(tmpdir = run_dir)
-  # dir.create(this_dir)
-  # #out_path <- paste0(this_dir, "-output")
-  # out_path <- paste0(this_dir)
-  # dir.create(out_path)
-  this_dir <- run_path
-  
+
+  #parameter tags----
   tags.vul = tags.env = character()
   if(do.vuls){
     vuln_vec = par_vec[vul.par.idx]
@@ -60,6 +58,7 @@ objective_function <- function(log_par_vec, run_path) {
   
   tags = c(tags.vul,tags.env)
   
+  #command files----
   cmd_j <- cmd_base
   cmd_j[startsWith(cmd_j, "<ECOSPACE_OUTPUT_DIR>")] <-
     sprintf("<ECOSPACE_OUTPUT_DIR>, %s, System.String, Updated", this_dir)
@@ -67,7 +66,7 @@ objective_function <- function(log_par_vec, run_path) {
   cmd_file <- file.path(this_dir, "cmd.txt")
   writeLines(cmd_j, cmd_file)
   
-  
+  #run EwE----
   result <- tryCatch({
     withTimeout({
       fn.runEwE(dir.cmdfile=cmd_file, do.obj=calibration)
@@ -86,7 +85,7 @@ objective_function <- function(log_par_vec, run_path) {
   
   cat(sprintf("Run complete. Score = %.4f\n", score))
   cache[[config_hash]] <- score
-  unlink(this_dir, recursive=TRUE)
+  #unlink(this_dir, recursive=TRUE)
   return(score)
 }
 
@@ -96,15 +95,15 @@ objective_function <- function(log_par_vec, run_path) {
 fn.calibrate_ecospace<- function(method, do.vuls, do.env, predprey_pairs, env_respfxns, calibration = 1,
                                   n_cores = max(detectCores()-1,1), config = list(), output_base=dir.out) {
    
-  # calibration = 1
-  # n_cores = max(detectCores()-1,1)
-  # method = "GA"
-  # do.vuls = TRUE
-  # do.env = FALSE
-  # predprey_pairs = predcol_vuls #predprey.sens[,c(1:2,5)]
-  # env_respfxns = NULL
-  # output_base = dir.out
-  # config <- myconfig #list(popSize = 24, run = 10, pmutation = 0.2, maxiter = 50)
+  calibration = 1
+  n_cores = detectCores()-1
+  method = "GA"
+  do.vuls = TRUE
+  do.env = FALSE
+  predprey_pairs = predcol_vuls #predprey.sens[,c(1:2,5)]
+  env_respfxns = NULL
+  output_base = dir.out
+  config <- myconfig #list(popSize = 24, run = 10, pmutation = 0.2, maxiter = 50)
   
   seed <- 42
   set.seed(seed)
@@ -171,6 +170,8 @@ fn.calibrate_ecospace<- function(method, do.vuls, do.env, predprey_pairs, env_re
   upper.vuls <- rep(log(VULN_MAX+1),n_vuls)
   lower.env <- rep(0,n_env)
   upper.env <- rep(1,n_env)
+  L.bounds <- c(lower.vuls,lower.env)
+  U.bounds <- c(upper.vuls, upper.env)
   
   # create output directory------------------------------------------------------
   timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
@@ -181,38 +182,46 @@ fn.calibrate_ecospace<- function(method, do.vuls, do.env, predprey_pairs, env_re
   # Initialize cache------------------------------------------------------------
   cache <- new.env(hash = TRUE, parent = emptyenv())
   
-  # GA SETUP----------------------------------------------------------------------
+  # ga setup----------------------------------------------------------------------
   #=== 3. Standardized Objective Function (Minimization) ===
   # This function is used by all methods. It returns the raw score (lower is better).
   ###initialize GA----
+  # ga.popfxn = function(object){
+  #   init.pars = log_par_vec #log(predprey_pairs$baseval)
+  #   popSize = run_config$popSize
+  #   nBits = n_pars
+  #   matrix(rep(init.pars,popSize),ncol=nBits, nrow=popSize, byrow = T)
+  # }
+  
   ga.popfxn = function(object){
-    init.pars = log_par_vec #log(predprey_pairs$baseval)
-    popSize = run_config$popSize
-    nBits = n_pars
-    matrix(rep(init.pars,popSize),ncol=nBits, nrow=popSize, byrow = T)
+    #matrix(runif(run_config$popSize*n_pars, L.bounds, U.bounds), nrow=run_config$popSize, byrow=T)
+    matrix(rep(log_par_vec, run_config$popSize), nrow=run_config$popSize, byrow=T)
   }
   
-  ### fitness wrapper-------------------------------------------------------------
+
+  # ### fitness wrapper-------------------------------------------------------------
   fitness_wrapper <- function(log_par_vec) {
     tryCatch({
     #create unique run directory for each thread
     run_id <- paste0("run_", digest(log_par_vec, algo=c("md5")))
     run_path <- file.path(run_dir, run_id)
     dir.create(run_path, showWarnings = TRUE)
-    
-    
+
+
     # Write input files, run model, read output
     score <- objective_function(log_par_vec, run_path=run_path )
-    
+
     # Clean up if needed
-    unlink(run_path, recursive = TRUE)
-    
+    #unlink(run_path, recursive = TRUE)
+
     return(-score)
     }, error = function(e) {
       cat("Error in fitness_wrapper:", conditionMessage(e), "\n")
       return(-Inf)
     })
   }
+
+  
 
 
   ### setup clusters----   
@@ -221,13 +230,14 @@ fn.calibrate_ecospace<- function(method, do.vuls, do.env, predprey_pairs, env_re
   registerDoParallel(cl)
   clusterExport(cl,
                  c("objective_function", "cache", "predprey_pairs", "run_dir","do.vuls","do.env","env_respfxns","vul.par.idx","env.par.idx","log_par_vec",
-                   "cmd_base", "fn.runEwE", "digest", "withTimeout", "calibration", "lower.vuls","upper.vuls","lower.env","upper.env",
+                   "cmd_base", "fn.runEwE", "digest", "withTimeout", "calibration", "L.bounds","U.bounds",
                    "ga.popfxn","run_config","seed", "fitness_wrapper","file.console","obs.ts","group.names","df.names","startyear","endyear_sens"),
                  envir = environment())
-  
+
   clusterEvalQ(cl, {
-    library(digest)
-    library(R.utils)
+    # Packages to distribute to workers
+    library('digest')
+    library('R.utils')
     library('GA')
     library('cmaes')
     library('rBayesianOptimization')
@@ -236,9 +246,8 @@ fn.calibrate_ecospace<- function(method, do.vuls, do.env, predprey_pairs, env_re
     library('readxl')
     library('doParallel')
     library('R.utils')
-    # Add any other packages used in fn.runEwE or fn.objfxn1
   })
-  
+
   
   
   # # === 4. Method-Specific Execution ===
@@ -250,8 +259,8 @@ fn.calibrate_ecospace<- function(method, do.vuls, do.env, predprey_pairs, env_re
   result_object <- ga(
       type = "real-valued",
       fitness = fitness_wrapper,
-      lower = c(lower.vuls, lower.env), #rep(log(VULN_MIN), n_vars),
-      upper = c(upper.vuls, upper.env), #rep(log(VULN_MAX), n_vars),
+      lower = L.bounds, #rep(log(VULN_MIN), n_vars),
+      upper = U.bounds, #rep(log(VULN_MAX), n_vars),
       popSize = run_config$popSize,
       run = run_config$run,
       maxiter = run_config$maxiter,
@@ -264,6 +273,7 @@ fn.calibrate_ecospace<- function(method, do.vuls, do.env, predprey_pairs, env_re
     )
     
     best_par_log <- result_object@solution[1, ]
+    cbind(log_par_vec, best_par_log)
     summary(result_object)
     result_object@fitness
 
@@ -290,4 +300,208 @@ fn.calibrate_ecospace<- function(method, do.vuls, do.env, predprey_pairs, env_re
   cat("Results saved successfully.\n")
   
   return(list(best_parameters = results_df, result_object = result_object))
+}
+
+#CUSTOM GA CALIBRATION----------------------------------------------------------
+fn.calibrate_ecospace_customGA <- function(do.vuls, do.env, predprey_pairs, env_respfxns, calibration = 1,
+                                           n_cores = max(detectCores()-1,1), config = list(), output_base=dir.out){
+
+# === Setup Parallel Cluster ===
+closeAllConnections()
+n_cores <- parallel::detectCores()
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+clusterEvalQ(cl, {
+  library(digest)
+  library(R.utils)
+})
+
+
+calibration = 1
+do.vuls = TRUE
+do.env = FALSE
+predprey_pairs = predcol_vuls #predprey.sens[,c(1:2,5)]
+env_respfxns = NULL
+output_base = dir.out
+config <- myconfig #list(popSize = 24, run = 10, pmutation = 0.2, maxiter = 50)
+
+# seed <- 42
+# set.seed(seed)
+# set.seed(NULL)
+
+## validate setup-------------------------------------------------------------
+if (!exists("cmd_base") || !exists("fn.runEwE")) {
+  stop("Required variables 'cmd_base' and/or 'fn.runEwE' not found. Ensure setup.R is sourced.")
+}
+
+if(do.vuls){
+  pdcol = unique(predprey_pairs$pred[is.na(predprey_pairs$prey)])
+  pdpy = c(0,unique(predprey_pairs$pred[!is.na(predprey_pairs$prey)]))
+  if(length(which(pdcol %in% pdpy))>0){
+    stop("Trying to estimate ki and kij for at least on predator. Check predprey_pairs input.")
+  }
+}
+
+## make parameter vector---------------------------------------------------
+n_vuls <- n_env <- 0
+if(do.vuls) n_vuls <- nrow(predprey_pairs)
+if(do.env) n_env <- nrow(env_respfxn)  #need to melt the env resp fxn dataframe
+#medations functions
+
+n_pars = n_vuls + n_env
+if (n_pars == 0) stop("n_pars==0: No predator-prey pairs or environmental responses parameters to estimate.  Check inputs.")
+
+log_vuln_vec = log_env_vec = numeric()
+if(do.vuls) log_vuln_vec = log(predprey_pairs$baseval+1)
+if(do.env) log_env_vec = log(env_respfxns$baseval+1)
+log_par_vec = c(log_vuln_vec,log_env_vec)
+
+# index parameter types-------------------------------------------------------
+#need to think about how to index the parameter vector as it continues to grow
+vul.par.idx = env.par.idx = numeric()
+if(do.vuls & !do.env){ 
+  vul.par.idx = 1:n_vuls
+} else if(do.env & !do.vuls) {
+  env.par.idx = 1:n_env
+} else {
+  vul.par.idx = 1:n_vuls
+  env.par.idx = (n_vuls+1):(n_vuls+n_env)
+}  
+length(log_par_vec)
+log_par_vec
+
+# set parameter bounds--------------------------------------------------------
+VULN_MIN <- 1.01
+VULN_MAX <- 1e6
+
+lower.vuls <- upper.vuls <- lower.env <- upper.env <- numeric()
+lower.vuls <- rep(log(VULN_MIN+1),n_vuls)
+upper.vuls <- rep(log(VULN_MAX+1),n_vuls)
+lower.env <- rep(0,n_env)
+upper.env <- rep(1,n_env)
+L.bounds <- c(lower.vuls,lower.env)
+U.bounds <- c(upper.vuls, upper.env)
+
+# create output directory------------------------------------------------------
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+run_dir <- file.path(output_base, paste0("customGA_Run_", timestamp))
+dir.create(run_dir, recursive = TRUE)
+cat(sprintf("Output will be saved in: %s\n", run_dir))
+
+# === GA Parameters ===
+
+# === Initialize Population ===
+  pop_size <- config$popSize
+  n_generations <- config$n_gen
+  mutation_rate <- config$pmutation
+  elitism <- config$elitism
+  n_pars <- length(log_par_vec)  # number of parameters
+  lower_bounds <- L.bounds
+  upper_bounds <- U.bounds
+
+  initialize_population <- function() {
+    matrix(runif(pop_size * n_pars, lower_bounds, upper_bounds), nrow = pop_size, byrow=T)
+  }
+
+# === Fitness Evaluation ===
+evaluate_fitness <- function(population) {
+  score <- foreach(i = 1:nrow(population), .combine = c, .packages = c("digest", "R.utils"), .export=cl.export.list) %dopar% {
+    #i=15
+    #tryCatch({
+    log_par_vec.i <- population[i, ]
+    run_path <- tempfile(tmpdir = run_dir)
+    dir.create(run_path)
+    
+    
+    # Write input files, run model, read output
+    objective_function(log_par_vec.i, run_path=run_path )
+  }
+  return(-score)
+}
+    # Clean up if needed
+    #unlink(run_path, recursive = TRUE)
+    
+    # }, error = function(e) {
+    #   cat("Error in fitness_wrapper:", conditionMessage(e), "\n")
+    #   return(-Inf)
+    # })
+   
+
+
+
+# === Selection ===
+select_parents <- function(population, fitness) {
+  ranks <- rank(-fitness)
+  probs <- ranks / sum(ranks)
+  selected <- population[sample(1:nrow(population), pop_size, replace = TRUE, prob = probs), ]
+  return(selected)
+}
+
+# === Crossover ===
+crossover <- function(parents) {
+  offspring <- parents
+  for (i in seq(1, pop_size - 1, by = 2)) {
+    if (runif(1) < 0.8) {
+      point <- sample(1:(n_pars - 1), 1)
+      temp <- offspring[i, (point + 1):n_pars]
+      offspring[i, (point + 1):n_pars] <- offspring[i + 1, (point + 1):n_pars]
+      offspring[i + 1, (point + 1):n_pars] <- temp
+    }
+  }
+  return(offspring)
+}
+
+# === Mutation ===
+mutate <- function(population) {
+  for (i in 1:nrow(population)) {
+    for (j in 1:n_pars) {
+      if (runif(1) < mutation_rate) {
+        population[i, j] <- runif(1, lower_bounds[j], upper_bounds[j])
+      }
+    }
+  }
+  return(population)
+}
+
+# === GA Loop ===
+#initialize cache
+cache <- new.env(hash = TRUE, parent = emptyenv())
+# Export required variables and packages to cluster
+cl.export.list = c("log_par_vec","L.bounds","U.bounds","config","run_dir","initialize_population","evaluate_fitness",
+                           "obs.ts","file.console", "fn.runEwE", "fn.objfxn1", "fn.objfxn2", "group.names","df.names","do.vuls","do.env",
+                           "objective_function","mutate","crossover","select_parents","cache","vul.par.idx","env.par.idx","predprey_pairs",
+                           "cmd_base")
+clusterExport(cl, cl.export.list, envir = environment())
+
+population <- initialize_population()
+fitness <- evaluate_fitness(population)
+
+for (gen in 1:n_generations) {
+  #gen=1
+  cat(sprintf("Generation %d: Best fitness = %.4f\n", gen, max(fitness)))
+  
+  # Elitism
+  elite_idx <- order(fitness, decreasing = TRUE)[1:elitism]
+  elite <- population[elite_idx, ]
+  
+  # Selection, Crossover, Mutation
+  parents <- select_parents(population, fitness)
+  offspring <- crossover(parents)
+  offspring <- mutate(offspring)
+  
+  # Evaluate new population
+  new_fitness <- evaluate_fitness(offspring)
+  
+  # Combine elite + offspring
+  population <- rbind(elite, offspring[-(1:elitism), ])
+  fitness <- c(fitness[elite_idx], new_fitness[-(1:elitism)])
+}
+
+# === Final Result ===
+best_idx <- which.max(fitness)
+best_solution <- population[best_idx, ]
+cat("Best parameters found:\n")
+print(exp(best_solution) - 1)
+
+stopCluster(cl)
 }
