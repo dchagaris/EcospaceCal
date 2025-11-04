@@ -55,8 +55,13 @@ fn.makeparvec <- function(
   upper.env <- rep(1,n_env)
   L.bounds <<- c(lower.vuls,lower.env)
   U.bounds <<- c(upper.vuls, upper.env)
-  
-  
+}
+
+#make GA populations----
+fn.GApop = function(object){
+  run_config <- myconfig
+  matrix(runif(run_config$popSize*n_pars, L.bounds, U.bounds), nrow=run_config$popSize, byrow=T)
+  #matrix(rep(log_par_vec, run_config$popSize), nrow=run_config$popSize, byrow=T)
 }
 
 #write command files----
@@ -67,7 +72,7 @@ fn.parvec2cmd <- function(log_par_vec){
   run_id <- paste0("run_", digest(log_par_vec, algo=c("md5")))
   run_path <- file.path(run_dir, run_id)
   dir.create(run_path, showWarnings = TRUE)
-  
+
   #parameter tags----
   tags.vul = tags.env = character()
   if(length(vul.par.idx)>0){
@@ -94,13 +99,6 @@ fn.parvec2cmd <- function(log_par_vec){
   
 }
 
-#make GA populations----
-fn.GApop = function(object){
-  run_config <- myconfig
-  matrix(runif(run_config$popSize*n_pars, L.bounds, U.bounds), nrow=run_config$popSize, byrow=T)
-  #matrix(rep(log_par_vec, run_config$popSize), nrow=run_config$popSize, byrow=T)
-}
-
 #run the population of models----
 fn.runEwE.gapop <-  function(
     files.cmd, 
@@ -108,33 +106,29 @@ fn.runEwE.gapop <-  function(
     cl.export = list("files.cmd", "obs.ts")
 ){
   #source(file.setup)
-  t1 <- Sys.time()
-  if(!exists('cl')){
-  cl <- makeSOCKcluster(detectCores()-1)
-  registerDoSNOW(cl)
+
   clusterExport(cl,append(cl.export,list("file.console", "fn.runEwE", "fn.objfxn1", "fn.objfxn2","startyear","endyear_sens","group.names","df.names")))
-  print(paste('Setup',detectCores()-1,'Clusters: Overhead time',round(as.numeric(Sys.time()-t1),2)))
-  }
+
   #runlist=runlist[1:20,]
   pbar <- winProgressBar("Running Ecospace GApop",label=paste0("Simulation 0 of ",length(files.cmd)),max=100)
   prog <- function(n) setWinProgressBar(pbar,(n/length(files.cmd)*100),label=paste("Simulation Run", n,"of", 
                                                                                    length(files.cmd),"Completed"))
   opts <- list(progress=prog)
   
-  print(paste('Running',length(files.cmd),'Ecospace simulations'))
+  #print(paste('Running',length(files.cmd),'Ecospace simulations'))
   t1 <- Sys.time()
   runs <- foreach(i = 1:length(files.cmd), .errorhandling = 'pass', .options.snow = opts) %dopar% {
     fn.runEwE(dir.cmdfile=files.cmd[i], do.obj = obj.fxn)
   }
   close(pbar)
-  print(paste('Run time',round(as.numeric(Sys.time()-t1),2)))
+  #print(paste('Run time',round(as.numeric(Sys.time()-t1),2)))
   
   ##missing runs----
   filecheck <- sapply(dirname(files.cmd),FUN=function(x)length(list.files(x)))
   erruns <- which(filecheck<=1)  
   
   while(length(erruns)>=1){
-    print(paste0('Redo missing runs: n=',length(erruns)))
+    #print(paste0('Redo missing runs: n=',length(erruns)))
     
     pbar <- winProgressBar("Running Ecospace GApop: Missing Runs",label=paste0("Simulation 0 of ",length(erruns)),max=100)
     prog <- function(n) setWinProgressBar(pbar,(n/length(erruns)*100),label=paste("Simulation Run", n,"of", length(erruns),"Completed"))
@@ -151,30 +145,20 @@ fn.runEwE.gapop <-  function(
     erruns <- which(filecheck<=1)  #if there are many missing runs, then need to do this in parallel
   }
   
-  fitness = runs[,1]   #cbind(runlist, do.call(rbind, runs))
-  print('All runs completed')
+  fitness <- sapply(runs, function(x) x[1])   #cbind(runlist, do.call(rbind, runs))
+  #print('All runs completed')
   #stopCluster(cl);
   #closeAllConnections()
-  return(fitness)
+  unlink(list.dirs(run_dir, full.names = T, recursive = F), recursive=T)
+  return(-fitness)
 }
 
-
-
-#GA Loop----
-##apply GA selection----
-pop_size <- config$popSize
-n_generations <- config$n_gen
-mutation_rate <- config$pmutation
-elitism <- config$elitism
-n_pars <- length(log_par_vec)  # number of parameters
-lower_bounds <- L.bounds
-upper_bounds <- U.bounds
-
 # === Selection ===
-select_parents <- function(population, fitness) {
-  ranks <- rank(-fitness)
+select_parents <- function(gapop, fitness) {
+  ranks <- rank(fitness)
   probs <- ranks / sum(ranks)
-  selected <- population[sample(1:nrow(population), pop_size, replace = TRUE, prob = probs), ]
+  #cbind(ranks,fitness,probs)
+  selected <- gapop[sample(1:nrow(gapop), pop_size, replace = TRUE, prob = probs), ]
   return(selected)
 }
 
@@ -194,14 +178,58 @@ crossover <- function(parents) {
 
 # === Mutation ===
 mutate <- function(population) {
+  #population=gapop
+  low = apply(population,2,min)
+  upp = apply(population,2,max)
   for (i in 1:nrow(population)) {
     for (j in 1:n_pars) {
       if (runif(1) < mutation_rate) {
-        population[i, j] <- runif(1, lower_bounds[j], upper_bounds[j])
+        population[i, j] <- runif(1, low[j], upp[j])
       }
     }
   }
   return(population)
+}
+
+
+#GA function----
+fn.GA <- function(myconfig){
+  pop_size <<- myconfig$popSize
+  n_generations <<- myconfig$n_gen
+  mutation_rate <<- myconfig$pmutation
+  elitism <<- myconfig$elitism
+  
+  #initial population
+  gapop.init <- fn.GApop()
+  apply(gapop.init,1,function(x) fn.parvec2cmd(x)) 
+  files.cmd <- list.files(path=run_dir,pattern="cmd.txt", full.names=T, recursive=T)
+  fitness <- fn.runEwE.gapop(files.cmd, obj.fxn=1, cl.export = list("obs.ts"))
+  gapop <- gapop.init
+  
+  for (gen in 1:n_generations) {
+    #gen=1
+    cat(sprintf("Generation %d: Best fitness = %.4f\n", gen, max(fitness)))
+    
+    # Elitism
+    elite_idx <- order(fitness, decreasing = TRUE)[1:elitism]
+    elite <- gapop[elite_idx, ]
+    
+    # Selection, Crossover, Mutation
+    parents <- select_parents(gapop, fitness)
+    offspring <- crossover(parents)
+    offspring <- mutate(offspring)
+    
+    # Evaluate new population
+    apply(offspring,1,function(x) fn.parvec2cmd(x)) 
+    files.cmd <- list.files(path=run_dir,pattern="cmd.txt", full.names=T, recursive=T)
+    new_fitness <- fn.runEwE.gapop(files.cmd, obj.fxn=1, cl.export = list("obs.ts"))
+    
+    # Combine elite + offspring
+    offspring.rank = rank(new_fitness)
+    drop.idx = which(offspring.rank<=elitism)
+    gapop <- rbind(elite, offspring[-drop.idx,])
+    fitness <- c(fitness[elite_idx], new_fitness[-drop.idx])
+  }
 }
 ##parents----
 ##crossover----
