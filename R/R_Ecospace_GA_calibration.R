@@ -2,11 +2,13 @@
 #prepare parameter vector----
 fn.makeparvec <- function(
   do.vuls = TRUE, 
-  do.env = FALSE, 
+  do.env = TRUE, 
   predprey_pairs = predcol_vuls,
-  env_respfxns = NULL,
+  envpars = envpars,
   vul.min = 1.01,
-  vul.max = 1e6){
+  vul.max = 1e6,
+  envpars.min=0.25,
+  envpars.max=2){
   
   #validate setup----
   if(do.vuls){
@@ -20,7 +22,7 @@ fn.makeparvec <- function(
   #make parameter vector
   n_vuls <- n_env <- 0
   if(do.vuls) n_vuls <- nrow(predprey_pairs)
-  if(do.env) n_env <- nrow(env_respfxn)  #need to melt the env resp fxn dataframe
+  if(do.env) n_env <- nrow(envpars)  #need to melt the env resp fxn dataframe
   #medations functions
   
   n_pars <<- n_vuls + n_env
@@ -28,7 +30,7 @@ fn.makeparvec <- function(
   
   log_vuln_vec = log_env_vec = numeric()
   if(do.vuls) log_vuln_vec = log(predprey_pairs$baseval+1)
-  if(do.env) log_env_vec = log(env_respfxns$baseval+1)
+  if(do.env) log_env_vec = rep(0,n_env)
   log_par_vec <<- c(log_vuln_vec,log_env_vec)
   
   # index parameter types-------------------------------------------------------
@@ -47,14 +49,17 @@ fn.makeparvec <- function(
   
   # index pred-prey vulnerabilities
   predprey_pairs <<- predprey_pairs
+  
   # set parameter bounds--------------------------------------------------------
   lower.vuls <- upper.vuls <- lower.env <- upper.env <- numeric()
   lower.vuls <- rep(log(vul.min+1),n_vuls)
   upper.vuls <- rep(log(vul.max+1),n_vuls)
-  lower.env <- rep(0,n_env)
+  lower.env <- rep(-1,n_env)
   upper.env <- rep(1,n_env)
   L.bounds <<- c(lower.vuls,lower.env)
   U.bounds <<- c(upper.vuls, upper.env)
+  n_vuls <<- n_vuls
+  n_env <<- n_env
 }
 
 #make GA populations----
@@ -66,7 +71,8 @@ fn.GApop = function(object){
 
 #write command files----
 fn.parvec2cmd <- function(log_par_vec){
-  par_vec <- exp(log_par_vec)-1
+  #par_vec <- log_par_vec
+  #log_par_vec=gapop.init[1,]
   
   #output directory----
   run_id <- paste0("run_", digest(log_par_vec, algo=c("md5")))
@@ -76,14 +82,27 @@ fn.parvec2cmd <- function(log_par_vec){
   #parameter tags----
   tags.vul = tags.env = character()
   if(length(vul.par.idx)>0){
-    vuln_vec = par_vec[vul.par.idx]
+    vuln_vec = exp(log_par_vec[vul.par.idx])-1
     tags.vul <- paste0("<ECOSIM_VULNERABILITIES_INDEXED>(", predprey_pairs$pred, " ", ifelse(is.na(predprey_pairs$prey),"",predprey_pairs$prey),
                        "), ", sprintf("%.5f", vuln_vec), ", Indexed.Single")
   }
   
   if(length(env.par.idx)>0){
-    env_vec = par_vec[env.par.idx]
-    tags.env <- paste0("<ECOSIM_ENVIRONMENTAL_RESPONSE_INDEXED>(", respfxn_num,")",sprintf("%.5f", env_pars), ", Indexed.Single[]")
+    env_vec = exp(log_par_vec[env.par.idx])
+    respfxn_num = envpars$Function.number
+    respfxn_type = envpars$Function.type
+    pars1 <- pars2 <- pars3 <- pars4 <- pars5 <- numeric(length=n_env)
+    for(p in 1:n_env){
+      #p=1
+      if(respfxn_type[p]==9){
+        pars1[p] = ifelse(envpars$Param.1[p]==0 & envpars$Param.2[p]==0,0,0.5*(1-env_vec[p])*(envpars$Param.4[p]-envpars$Param.1[p])+envpars$Param.1[p])
+        pars2[p] = ifelse(envpars$Param.1[p]==0 & envpars$Param.2[p]==0,0,0.5*(1-env_vec[p])*(envpars$Param.3[p]-envpars$Param.2[p])+envpars$Param.2[p])
+        pars3[p] = envpars$Param.3[p]-0.5*(1-env_vec[p])*(envpars$Param.3[p]-envpars$Param.2[p])
+        pars4[p] = envpars$Param.4[p]-0.5*(1-env_vec[p])*(envpars$Param.4[p]-envpars$Param.1[p])
+      }
+    }
+    env_pars = paste(respfxn_type,sprintf("%.2f",pars1), sprintf("%.2f",pars2), sprintf("%.2f",pars3), sprintf("%.2f",pars4))
+    tags.env <- paste0("<ECOSPACE_ENVIRONMENTAL_RESPONSE_INDEXED>(", respfxn_num,"),", env_pars,", Indexed.Single[]")
   }
   
   tags = c(tags.vul,tags.env)
@@ -103,7 +122,7 @@ fn.parvec2cmd <- function(log_par_vec){
 fn.runEwE.gapop <-  function(
     files.cmd, 
     obj.fxn=1, 
-    cl.export = list("files.cmd", "obs.ts")
+    cl.export = list('files.cmd','obs.ts')
 ){
   #source(file.setup)
 
@@ -201,13 +220,16 @@ fn.GA <- function(myconfig){
   
   #initial population
   gapop.init <- fn.GApop()
-  apply(gapop.init,1,function(x) fn.parvec2cmd(x)) 
+  gapop.init[1,] <- log_par_vec
+  #fn.parvec2cmd(log_par_vec=gapop.init[1,])
+  apply(gapop.init,1,function(x) fn.parvec2cmd(log_par_vec=x)) 
   files.cmd <- list.files(path=run_dir,pattern="cmd.txt", full.names=T, recursive=T)
+  #test <- fn.runEwE(dir.cmdfile = files.cmd[1], do.obj=1)
   fitness <- fn.runEwE.gapop(files.cmd, obj.fxn=1, cl.export = list("obs.ts"))
   gapop <- gapop.init
-  
+  cat(sprintf("Generation 0: Base run fitness = %.4f\n", fitness[1]))
   for (gen in 1:n_generations) {
-    #gen=1
+    #gen=2
     cat(sprintf("Generation %d: Best fitness = %.4f\n", gen, max(fitness)))
     
     # Elitism
@@ -215,9 +237,9 @@ fn.GA <- function(myconfig){
     elite <- gapop[elite_idx, ]
     
     # Selection, Crossover, Mutation
-    parents <- select_parents(gapop, fitness)
-    offspring <- crossover(parents)
-    offspring <- mutate(offspring)
+    parents <- select_parents(gapop, fitness) #resamples the population, with replacement, with rank-based probabilities
+    offspring <- crossover(parents) #offspring are when two parents crossover a part of their parameter vector
+    offspring <- mutate(offspring) #randomly draw new parameter values to mutate the individual
     
     # Evaluate new population
     apply(offspring,1,function(x) fn.parvec2cmd(x)) 
