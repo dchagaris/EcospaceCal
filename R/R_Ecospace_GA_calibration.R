@@ -32,7 +32,7 @@ fn.makeparvec <- function(
   if(do.vuls) log_vuln_vec = log(predprey_pairs$baseval+1)
   if(do.env) log_env_vec = rep(0,n_env)
   log_par_vec <<- c(log_vuln_vec,log_env_vec)
-  
+
   # index parameter types-------------------------------------------------------
   #need to think about how to index the parameter vector as it continues to grow
   vul.par.idx = env.par.idx = numeric()
@@ -60,6 +60,8 @@ fn.makeparvec <- function(
   U.bounds <<- c(upper.vuls, upper.env)
   n_vuls <<- n_vuls
   n_env <<- n_env
+  names(log_par_vec) <<- c(paste('vul',predprey_pairs$pred,predprey_pairs$prey,sep="_"),
+                          paste('env',envpars$Function.number,sep="_"))
 }
 
 #make GA populations----
